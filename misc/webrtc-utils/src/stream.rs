@@ -64,7 +64,9 @@ pub const MAX_MSG_LEN: usize = DEFAULT_MAX_MESSAGE_SIZE.get();
 ///
 /// The same value must be used by the framing codec, its write high-water mark and the
 /// transport's data-channel backpressure accounting. Keeping it in one value prevents those
-/// layers from silently disagreeing about a valid frame size.
+/// layers from silently disagreeing about a valid frame size. Transport-local aggregate receive
+/// buffers are intentionally separate: they may temporarily hold multiple valid messages while a
+/// consumer is not polled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamConfig {
     max_message_size: NonZeroUsize,
