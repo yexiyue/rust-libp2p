@@ -12,7 +12,7 @@ use std::{
 
 use bytes::BytesMut;
 use futures::{AsyncRead, AsyncWrite, task::AtomicWaker};
-use libp2p_webrtc_utils::MAX_MSG_LEN;
+use libp2p_webrtc_utils::StreamConfig;
 use wasm_bindgen::prelude::*;
 use web_sys::{Event, MessageEvent, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelState};
 
@@ -44,6 +44,7 @@ pub(crate) struct PollDataChannel {
     /// Failing these will (very likely),
     /// cause the application developer to drop the stream which resets it.
     overloaded: Rc<AtomicBool>,
+    max_message_size: usize,
 
     /// Owns the JavaScript callbacks for the shared lifetime of all clones.
     _event_handlers: Rc<EventHandlers>,
@@ -81,7 +82,7 @@ fn defer_wake(waker: Rc<AtomicWaker>) {
 }
 
 impl PollDataChannel {
-    pub(crate) fn new(inner: RtcDataChannel) -> Self {
+    pub(crate) fn new(inner: RtcDataChannel, config: StreamConfig) -> Self {
         let open_waker = Rc::new(AtomicWaker::new());
         let on_open_closure = Closure::new({
             let open_waker = open_waker.clone();
@@ -132,7 +133,7 @@ impl PollDataChannel {
 
                 let mut read_buffer = read_buffer.lock().unwrap();
 
-                if read_buffer.len() + data.length() as usize > MAX_MSG_LEN {
+                if read_buffer.len() + data.length() as usize > config.max_message_size() {
                     overloaded.store(true, Ordering::SeqCst);
                     tracing::warn!("Remote is overloading us with messages, resetting stream",);
                     return;
@@ -152,6 +153,7 @@ impl PollDataChannel {
             write_waker,
             close_waker,
             overloaded,
+            max_message_size: config.max_message_size(),
             _event_handlers: Rc::new(EventHandlers {
                 inner,
                 _on_open_closure: on_open_closure,
@@ -237,8 +239,8 @@ impl AsyncWrite for PollDataChannel {
 
         futures::ready!(this.poll_ready(cx))?;
 
-        debug_assert!(this.buffered_amount() <= MAX_MSG_LEN);
-        let remaining_space = MAX_MSG_LEN - this.buffered_amount();
+        debug_assert!(this.buffered_amount() <= this.max_message_size);
+        let remaining_space = this.max_message_size - this.buffered_amount();
 
         if remaining_space == 0 {
             this.write_waker.register(cx.waker());
