@@ -1,6 +1,7 @@
 use std::{
     cmp::{max, min},
     io,
+    num::NonZeroUsize,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -16,14 +17,12 @@ use libp2p_webrtc_utils::StreamConfig;
 use wasm_bindgen::prelude::*;
 use web_sys::{Event, MessageEvent, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelState};
 
-/// Upper bound for bytes received by browser callbacks before Rust polls the stream again.
+/// Returns the local callback-buffer limit after enforcing the one-message invariant.
 ///
-/// This is intentionally independent of the encoded DataChannel message size. Browser events can
-/// enqueue multiple valid messages before a deferred waker lets the Rust task drain them.
-const DEFAULT_MAX_READ_BUFFER_SIZE: usize = 256 * 1024;
-
-fn max_read_buffer_size(config: StreamConfig) -> usize {
-    max(DEFAULT_MAX_READ_BUFFER_SIZE, config.max_message_size())
+/// Browser events can enqueue multiple valid messages before a deferred waker lets the Rust task
+/// drain them, so this is intentionally independent of the encoded DataChannel message size.
+fn effective_max_read_buffer_size(config: StreamConfig, configured: NonZeroUsize) -> usize {
+    max(configured.get(), config.max_message_size())
 }
 
 fn read_buffer_overflows(buffered: usize, incoming: usize, max_read_buffer_size: usize) -> bool {
@@ -96,8 +95,13 @@ fn defer_wake(waker: Rc<AtomicWaker>) {
 }
 
 impl PollDataChannel {
-    pub(crate) fn new(inner: RtcDataChannel, config: StreamConfig) -> Self {
-        let max_read_buffer_size = max_read_buffer_size(config);
+    pub(crate) fn new(
+        inner: RtcDataChannel,
+        config: StreamConfig,
+        configured_max_read_buffer_size: NonZeroUsize,
+    ) -> Self {
+        let max_read_buffer_size =
+            effective_max_read_buffer_size(config, configured_max_read_buffer_size);
         let open_waker = Rc::new(AtomicWaker::new());
         let on_open_closure = Closure::new({
             let open_waker = open_waker.clone();
@@ -224,36 +228,45 @@ mod tests {
 
     use libp2p_webrtc_utils::StreamConfig;
 
-    use super::{DEFAULT_MAX_READ_BUFFER_SIZE, max_read_buffer_size, read_buffer_overflows};
+    use super::{effective_max_read_buffer_size, read_buffer_overflows};
 
     #[test]
-    fn read_buffer_accepts_multiple_valid_small_messages() {
-        let config = StreamConfig::new(NonZeroUsize::new(8 * 1024).unwrap());
-        let max_read_buffer_size = max_read_buffer_size(config);
+    fn read_buffer_accepts_multiple_valid_messages() {
+        let message_size = NonZeroUsize::new(8 * 1024).unwrap();
+        let max_read_buffer_size = effective_max_read_buffer_size(
+            StreamConfig::new(message_size),
+            NonZeroUsize::new(256 * 1024).unwrap(),
+        );
 
-        assert_eq!(max_read_buffer_size, DEFAULT_MAX_READ_BUFFER_SIZE);
         assert!(!read_buffer_overflows(
-            8 * 1024,
-            8 * 1024,
-            max_read_buffer_size
+            message_size.get(),
+            message_size.get(),
+            max_read_buffer_size,
         ));
     }
 
     #[test]
-    fn read_buffer_remains_bounded() {
+    fn configured_read_buffer_remains_bounded() {
+        let max_read_buffer_size = 16 * 1024;
+
         assert!(read_buffer_overflows(
-            DEFAULT_MAX_READ_BUFFER_SIZE,
+            max_read_buffer_size,
             1,
-            DEFAULT_MAX_READ_BUFFER_SIZE,
+            max_read_buffer_size,
         ));
     }
 
     #[test]
-    fn read_buffer_supports_larger_configured_messages() {
-        let message_size = 512 * 1024;
-        let config = StreamConfig::new(NonZeroUsize::new(message_size).unwrap());
+    fn read_buffer_can_hold_one_larger_valid_message() {
+        let message_size = NonZeroUsize::new(512 * 1024).unwrap();
 
-        assert_eq!(max_read_buffer_size(config), message_size);
+        assert_eq!(
+            effective_max_read_buffer_size(
+                StreamConfig::new(message_size),
+                NonZeroUsize::new(256 * 1024).unwrap(),
+            ),
+            message_size.get(),
+        );
     }
 }
 
